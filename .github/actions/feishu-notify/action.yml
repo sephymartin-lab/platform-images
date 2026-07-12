@@ -1,0 +1,83 @@
+name: Feishu Notify
+description: Send a Feishu interactive card notification from GitHub Actions.
+
+inputs:
+  webhook:
+    description: Feishu custom bot webhook URL.
+    required: true
+  secret:
+    description: Optional Feishu custom bot signing secret.
+    required: false
+    default: ""
+  status:
+    description: "Notification status: started, success, failure, or cancelled."
+    required: true
+  title:
+    description: Notification title.
+    required: true
+  summary:
+    description: Short notification summary.
+    required: false
+    default: ""
+  run-url:
+    description: GitHub Actions run URL.
+    required: true
+  ref-name:
+    description: Branch or tag name.
+    required: false
+    default: ""
+  sha:
+    description: Commit SHA.
+    required: false
+    default: ""
+  actor:
+    description: GitHub actor.
+    required: false
+    default: ""
+  repository:
+    description: GitHub repository.
+    required: false
+    default: ""
+  workflow:
+    description: GitHub workflow name.
+    required: false
+    default: ""
+  run-number:
+    description: GitHub workflow run number.
+    required: false
+    default: ""
+  event-name:
+    description: GitHub event name.
+    required: false
+    default: ""
+  extra-fields:
+    description: JSON object containing additional card fields.
+    required: false
+    default: "{}"
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: 20
+
+    - name: Send Feishu card
+      shell: bash
+      env:
+        FEISHU_WEBHOOK: ${{ inputs.webhook }}
+        FEISHU_SECRET: ${{ inputs.secret }}
+        NOTIFY_STATUS: ${{ inputs.status }}
+        NOTIFY_TITLE: ${{ inputs.title }}
+        NOTIFY_SUMMARY: ${{ inputs.summary }}
+        RUN_URL: ${{ inputs.run-url }}
+        REF_NAME: ${{ inputs.ref-name }}
+        COMMIT_SHA: ${{ inputs.sha }}
+        ACTOR: ${{ inputs.actor }}
+        REPOSITORY: ${{ inputs.repository }}
+        WORKFLOW: ${{ inputs.workflow }}
+        RUN_NUMBER: ${{ inputs.run-number }}
+        EVENT_NAME: ${{ inputs.event-name }}
+        EXTRA_FIELDS: ${{ inputs.extra-fields }}
+      run: node "${GITHUB_ACTION_PATH}/send-card.js"

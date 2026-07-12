@@ -1,0 +1,229 @@
+name: Build cc-connect image
+
+on:
+  workflow_dispatch:
+  pull_request:
+    types:
+      - closed
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-cc-connect-image
+  cancel-in-progress: false
+
+env:
+  REGISTRY: docker-registry.sephy.top
+  IMAGE_NAME: docker-registry.sephy.top/cc-connect
+  BUILDX_CACHE_DIR: /_work/_buildx-cache/cc-connect
+
+jobs:
+  notify-start:
+    name: Notify start
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.pull_request.merged == true && github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on:
+      - self-hosted
+    timeout-minutes: 5
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare notification fields
+        id: fields
+        shell: bash
+        run: |
+          short_sha="${GITHUB_SHA::7}"
+          tags="latest, sha-${short_sha}"
+          trigger="Manual run"
+
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            tags="${tags}, pr-${{ github.event.pull_request.number }}"
+            trigger="Merged PR #${{ github.event.pull_request.number }}"
+          fi
+
+          {
+            echo "extra_fields<<JSON"
+            printf '{"Image":"%s","Tags":"%s","Registry":"%s","Trigger":"%s"}\n' \
+              "${IMAGE_NAME}" \
+              "${tags}" \
+              "${REGISTRY}" \
+              "${trigger}"
+            echo "JSON"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Send start notification
+        uses: ./.github/actions/feishu-notify
+        with:
+          webhook: ${{ secrets.FEISHU_WEBHOOK_URL }}
+          secret: ${{ secrets.FEISHU_BOT_SECRET }}
+          status: started
+          title: cc-connect image publish
+          summary: Docker image build and push started.
+          run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          ref-name: ${{ github.ref_name }}
+          sha: ${{ github.sha }}
+          actor: ${{ github.actor }}
+          repository: ${{ github.repository }}
+          workflow: ${{ github.workflow }}
+          run-number: ${{ github.run_number }}
+          event-name: ${{ github.event_name }}
+          extra-fields: ${{ steps.fields.outputs.extra_fields }}
+
+  build-and-push:
+    name: Build and push image
+    needs: notify-start
+    if: ${{ always() && (github.event_name == 'workflow_dispatch' || (github.event.pull_request.merged == true && github.event.pull_request.head.repo.full_name == github.repository)) }}
+    runs-on:
+      - self-hosted
+    env:
+      DOCKER_REGISTRY_USERNAME: ${{ secrets.DOCKER_REGISTRY_USERNAME }}
+      DOCKER_REGISTRY_PASSWORD: ${{ secrets.DOCKER_REGISTRY_PASSWORD }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Prepare local BuildKit cache
+        run: |
+          mkdir -p "${BUILDX_CACHE_DIR}"
+
+      - name: Verify registry is reachable
+        run: |
+          status="$(
+            curl --silent --show-error --output /dev/null \
+              --write-out "%{http_code}" \
+              --connect-timeout 10 \
+              --max-time 20 \
+              "https://${REGISTRY}/v2/" || true
+          )"
+
+          case "${status}" in
+            200|401) ;;
+            *)
+              echo "Registry ${REGISTRY} is not reachable from this runner; got HTTP ${status} from /v2/." >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Validate optional registry credentials
+        if: ${{ (env.DOCKER_REGISTRY_USERNAME == '') != (env.DOCKER_REGISTRY_PASSWORD == '') }}
+        run: |
+          echo "DOCKER_REGISTRY_USERNAME and DOCKER_REGISTRY_PASSWORD must be configured together, or both left empty for anonymous push." >&2
+          exit 1
+
+      - name: Log in to registry
+        if: ${{ env.DOCKER_REGISTRY_USERNAME != '' && env.DOCKER_REGISTRY_PASSWORD != '' }}
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ env.DOCKER_REGISTRY_USERNAME }}
+          password: ${{ env.DOCKER_REGISTRY_PASSWORD }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest
+            type=raw,value=pr-${{ github.event.pull_request.number }},enable=${{ github.event_name == 'pull_request' }}
+            type=sha,prefix=sha-,format=short
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: cc-connect
+          file: cc-connect/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=local,src=${{ env.BUILDX_CACHE_DIR }}
+          cache-to: type=local,dest=${{ env.BUILDX_CACHE_DIR }}-new,mode=max
+
+      - name: Rotate local BuildKit cache
+        if: always()
+        run: |
+          if [ -d "${BUILDX_CACHE_DIR}-new" ]; then
+            rm -rf "${BUILDX_CACHE_DIR}"
+            mv "${BUILDX_CACHE_DIR}-new" "${BUILDX_CACHE_DIR}"
+          fi
+
+  notify-finish:
+    name: Notify finish
+    needs:
+      - notify-start
+      - build-and-push
+    if: ${{ always() && (github.event_name == 'workflow_dispatch' || (github.event.pull_request.merged == true && github.event.pull_request.head.repo.full_name == github.repository)) }}
+    runs-on:
+      - self-hosted
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare notification result
+        id: result
+        shell: bash
+        run: |
+          case "${{ needs.build-and-push.result }}" in
+            success)
+              notify_status="success"
+              summary="Docker image build and push completed successfully."
+              ;;
+            cancelled)
+              notify_status="cancelled"
+              summary="Docker image build and push was cancelled."
+              ;;
+            *)
+              notify_status="failure"
+              summary="Docker image build and push failed. Open the GitHub Actions run for logs."
+              ;;
+          esac
+
+          short_sha="${GITHUB_SHA::7}"
+          tags="latest, sha-${short_sha}"
+          trigger="Manual run"
+
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            tags="${tags}, pr-${{ github.event.pull_request.number }}"
+            trigger="Merged PR #${{ github.event.pull_request.number }}"
+          fi
+
+          {
+            echo "status=${notify_status}"
+            echo "summary=${summary}"
+            echo "extra_fields<<JSON"
+            printf '{"Image":"%s","Tags":"%s","Registry":"%s","Trigger":"%s","Build Job Result":"%s"}\n' \
+              "${IMAGE_NAME}" \
+              "${tags}" \
+              "${REGISTRY}" \
+              "${trigger}" \
+              "${{ needs.build-and-push.result }}"
+            echo "JSON"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Send finish notification
+        uses: ./.github/actions/feishu-notify
+        with:
+          webhook: ${{ secrets.FEISHU_WEBHOOK_URL }}
+          secret: ${{ secrets.FEISHU_BOT_SECRET }}
+          status: ${{ steps.result.outputs.status }}
+          title: cc-connect image publish
+          summary: ${{ steps.result.outputs.summary }}
+          run-url: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          ref-name: ${{ github.ref_name }}
+          sha: ${{ github.sha }}
+          actor: ${{ github.actor }}
+          repository: ${{ github.repository }}
+          workflow: ${{ github.workflow }}
+          run-number: ${{ github.run_number }}
+          event-name: ${{ github.event_name }}
+          extra-fields: ${{ steps.result.outputs.extra_fields }}

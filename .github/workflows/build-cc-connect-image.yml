@@ -56,7 +56,7 @@ jobs:
           } >> "${GITHUB_OUTPUT}"
 
       - name: Send start notification
-        uses: ./.github/actions/feishu-notify
+        uses: sephymartin-lab/forge-actions/.github/actions/feishu-notify@main
         with:
           webhook: ${{ secrets.FEISHU_WEBHOOK_URL }}
           secret: ${{ secrets.FEISHU_BOT_SECRET }}
@@ -211,7 +211,7 @@ jobs:
           } >> "${GITHUB_OUTPUT}"
 
       - name: Send finish notification
-        uses: ./.github/actions/feishu-notify
+        uses: sephymartin-lab/forge-actions/.github/actions/feishu-notify@main
         with:
           webhook: ${{ secrets.FEISHU_WEBHOOK_URL }}
           secret: ${{ secrets.FEISHU_BOT_SECRET }}
